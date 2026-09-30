@@ -409,6 +409,19 @@ def test_the_post_step_will_not_use_a_previous_ledger_that_appeared_later(h):
     assert h.posted() == []
 
 
+def test_the_next_ledger_is_built_from_the_staged_copy_not_the_workspace_one(h):
+    """The reviewer reads previous-findings.json in the workspace. Emptying it
+    there must not drop F1 from the next ledger, or its ID would be reissued."""
+    reviewed = a_reviewed_branch(h)
+    start_round(h, comments=[previous_round(h, reviewed)])
+    (h.workspace / "previous-findings.json").write_text('{"findings": []}')
+    h.write_review("## Review, round 2\n", [])
+    posted = h.run("post")
+    assert posted.returncode == 0, posted.log
+    [body] = h.posted()
+    assert [f["id"] for f in ledger_in(body)["findings"]] == ["F1"]
+
+
 @pytest.mark.parametrize("secret", [GITHUB_TOKEN, CLAUDE_TOKEN])
 def test_a_review_that_contains_a_token_is_not_posted(h, secret):
     h.commit("base")

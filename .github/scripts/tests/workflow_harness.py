@@ -365,6 +365,18 @@ class Harness:
             env[key] = self.render(str(value))
         return env
 
+    def shell(self, step: dict) -> list[str]:
+        """The command GitHub runs the step with, from the workflow's own
+        shell setting, so that dropping `shell: bash` loses pipefail here too."""
+        defaults = self.workflow["jobs"]["review"].get("defaults") or {}
+        shell = step.get("shell") or (defaults.get("run") or {}).get("shell")
+        if shell == "bash":
+            return ["bash", "--noprofile", "--norc", "-eo", "pipefail"]
+        if shell is None:
+            # GitHub's default on Linux when bash is present.
+            return ["bash", "-e"]
+        raise ValueError(f"the harness does not know the shell {shell!r}")
+
     def run(self, key: str) -> StepResult:
         step = self.steps[key]
         (self.stub_dir / "api.json").write_text(json.dumps(self.api))
@@ -373,7 +385,7 @@ class Harness:
         script = self.root / "step.sh"
         script.write_text(self.render(step["run"]))
         done = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+            [*self.shell(step), str(script)],
             cwd=self.workspace,
             env=self.env(step),
             capture_output=True,

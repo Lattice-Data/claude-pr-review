@@ -90,6 +90,10 @@ permission, a removed input) is `v2`, and `v1` stays where it was. Pinning a
 full `v1.x.y` tag, or a commit SHA, instead of `v1` is the choice for a
 repository that wants to take each change deliberately.
 
+GitHub resolves `@v1` once, when a run is created. Re-running a job keeps
+the commit of the review it first ran, so only a new run, from a new push,
+picks up a moved `v1`.
+
 Writing to this repository is in effect writing to every consumer's review
 job, which can write to their PRs and spends their Claude subscription. Keep
 its writers few, and move tags only from `main`.

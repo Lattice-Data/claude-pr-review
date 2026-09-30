@@ -3,7 +3,7 @@
 # into other repositories.
 """Carry the PR review's findings from one round to the next.
 
-claude-pr-review.yml runs one review per push. Before this script each run
+The review workflow runs one review per push. Before this script each run
 started with no memory of the one before and deleted its comment, so a finding
 could be raised, fixed, and raised again in new words; a finding the author
 had declined came back every round; and nothing ever checked that a fix had

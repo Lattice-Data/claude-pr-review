@@ -1,0 +1,30 @@
+# Committed to Lattice-Data/lattice-tools as .github/workflows/claude-pr-review.yml.
+#
+# The review itself - workflow, scripts and skill - lives in
+# Lattice-Data/claude-pr-review. This file only says when it runs and what it
+# may do.
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: claude-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Only PRs from branches in this repository: a fork's PR gets no secrets.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    # What the review may do. The called workflow can use these or fewer,
+    # never more, and it fails to start if one is missing.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      checks: read
+      statuses: read
+    uses: Lattice-Data/claude-pr-review/.github/workflows/review.yml@v1
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

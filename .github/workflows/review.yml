@@ -2,13 +2,45 @@
 # into other repositories.
 name: Claude PR Review
 
+# Called from a consumer's pull_request workflow: callers/ holds the caller
+# each consumer commits, and README.md says how to adopt it. A called workflow
+# runs in the caller's context, so github.repository, github.event,
+# github.token and the secret below are all the consumer's, and "the PR"
+# everywhere in this file is the consumer's PR. Only job.workflow_repository
+# and job.workflow_sha name this repository.
 on:
-  pull_request:
-    types: [opened, synchronize]
-
-concurrency:
-  group: claude-pr-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  workflow_call:
+    inputs:
+      tooling_constraints:
+        description: >-
+          Lines appended to the reviewer's TOOLING CONSTRAINTS, for what is
+          true only of the calling repository, such as dependencies the
+          reviewer will see imported but cannot read. Write them as "- "
+          bullets.
+        type: string
+        required: false
+        default: ""
+      checkout_filter:
+        description: >-
+          git partial-clone filter for the PR checkout. The default fetches the
+          history without file contents, which arrive on demand; "" fetches
+          everything.
+        type: string
+        required: false
+        default: "blob:none"
+      max_turns:
+        description: The reviewer's turn limit.
+        type: number
+        required: false
+        default: 120
+      effort:
+        description: The reviewer's effort level, one of low, medium, high, xhigh or max.
+        type: string
+        required: false
+        default: high
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
 
 env:
   # Hidden marker stamped as the first line of every review Claude posts. It is
@@ -29,9 +61,13 @@ env:
 
 jobs:
   review:
-    # Only review PRs from branches within this repo; skip PRs opened from forks
-    # (fork PRs don't get access to repo secrets, so the review would fail anyway).
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # The caller's job carries the same guard, where a reader looks for it.
+    # This copy stops a caller that left it out from reviewing a fork's PR,
+    # which gets no secrets and would fail anyway, and from running on any
+    # event but pull_request, whose payload every step below reads.
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     # An opus review with up to 120 turns over a large diff needs room. A job
     # timeout kills the run before the review is posted, so it costs the whole
@@ -44,6 +80,11 @@ jobs:
     defaults:
       run:
         shell: bash
+    # The caller's job must grant at least these. A called workflow can keep
+    # or lower what its caller grants, never raise it, and one that asks for
+    # more fails before it starts, naming the permission it lacks. There is no
+    # id-token: the action is handed github.token (see the review step), so it
+    # never exchanges an OIDC token for the Claude GitHub App's.
     permissions:
       contents: read
       pull-requests: write
@@ -51,8 +92,40 @@ jobs:
       # minimizeComment mutation) needs issues:write even though creating it
       # only needs pull-requests:write.
       issues: write
-      id-token: write
+      # For `gh pr checks`, which shows the reviewer the CI results on HEAD.
+      checks: read
+      statuses: read
     steps:
+      - name: Check the inputs
+        env:
+          EFFORT: ${{ inputs.effort }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          TOOLING_REPOSITORY: ${{ job.workflow_repository }}
+          TOOLING_SHA: ${{ job.workflow_sha }}
+          TOOLING_REF: ${{ job.workflow_ref }}
+        run: |
+          # Both go onto the reviewer's command line, so each has to be a value
+          # and not something that reads as another flag.
+          case "$EFFORT" in
+            low|medium|high|xhigh|max) ;;
+            *)
+              echo "::error::effort must be one of low, medium, high, xhigh or max, not '$EFFORT'."
+              exit 1
+              ;;
+          esac
+          if ! [[ "$MAX_TURNS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::max_turns must be a whole number above zero, not '$MAX_TURNS'."
+            exit 1
+          fi
+          # An empty ref would make the tooling checkout below take this
+          # repository's default branch instead of the commit the workflow
+          # itself was read from.
+          echo "Review tooling: $TOOLING_REPOSITORY at $TOOLING_SHA ($TOOLING_REF)"
+          if [ -z "$TOOLING_REPOSITORY" ] || [ -z "$TOOLING_SHA" ]; then
+            echo "::error::job.workflow_repository or job.workflow_sha is empty, so there is no telling which commit of the review to run."
+            exit 1
+          fi
+
       - name: Check out the PR branch
         uses: actions/checkout@v6
         with:
@@ -62,11 +135,52 @@ jobs:
           # `git log` and any `origin/<base>...HEAD` diff fail and it can only
           # ever see the diff hunks - never the code they changed.
           fetch-depth: 0
-          # But fetch history without blob contents. This repo carries ~95 MB
-          # .h5ad fixtures across 47 branches, so a plain fetch-depth: 0 pulls
-          # 2.5 GB and took 8m24s of a 15-minute job. Blobless is ~18s and keeps
-          # every command above working; blobs are fetched on demand.
-          filter: blob:none
+          # But, by default, without blob contents: a repository with large
+          # binary files across its history would otherwise download every
+          # version of every one of them. Blobless keeps every command above
+          # working and fetches file contents on demand.
+          filter: ${{ inputs.checkout_filter }}
+
+      # This repository's scripts, skill and collector config, at the commit
+      # this workflow was read from. job.workflow_repository and
+      # job.workflow_sha name the called workflow; github.workflow_sha would be
+      # the caller's commit, which this repository does not have.
+      - name: Check out the review tooling
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .review-tooling
+          persist-credentials: false
+
+      # Everything a later step runs or trusts is copied out of the workspace
+      # before the reviewer starts, and the digests of the scripts are kept as
+      # a step output, where the reviewer cannot reach them. The reviewer's
+      # permissions (see the review step) let it write review.md and
+      # findings.json and nothing else; the digests are checked anyway before
+      # anything runs, so a hole in those permissions shows up as a refused
+      # step and not as a script that did something else with the repo token.
+      - name: Stage the review tooling
+        id: tooling
+        run: |
+          mkdir -p "${RUNNER_TEMP}/scripts" "${RUNNER_TEMP}/skill" "${RUNNER_TEMP}/otel"
+          cp .review-tooling/.github/scripts/review_ledger.py \
+            .review-tooling/.github/scripts/summarize_claude_usage.py \
+            "${RUNNER_TEMP}/scripts/"
+          # Outside the workspace, and outside .claude/ in particular: on a PR,
+          # claude-code-action deletes .claude/ and restores it from the base
+          # branch before the reviewer starts, so a skill copied there would
+          # be gone. The review step lets the reviewer read this directory.
+          cp .review-tooling/skills/github-pr-review/SKILL.md "${RUNNER_TEMP}/skill/"
+          cp .review-tooling/.github/otel/collector-config.yaml "${RUNNER_TEMP}/otel/"
+          # Out of the workspace, so the reviewer's searches never find this
+          # repository's files and take them for the PR's.
+          rm -rf .review-tooling
+          {
+            echo "manifest<<MANIFEST_EOF"
+            (cd "$RUNNER_TEMP" && sha256sum scripts/review_ledger.py scripts/summarize_claude_usage.py)
+            echo "MANIFEST_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       # Snapshot the previous rounds' reviews *before* the new one is posted.
       # Collapsing only this pre-existing set means a failed review never leaves
@@ -119,28 +233,24 @@ jobs:
           PR_API: repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}
           ISSUE_API: repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}
         run: |
-          # The scripts the later steps run are copied out of the checkout now,
-          # before the reviewer runs. The reviewer can write any file in the
-          # workspace, and a step that executed a script from there with the
-          # repo token would execute whatever a steered reviewer had put in it.
-          mkdir -p "${RUNNER_TEMP}/scripts"
-          cp .github/scripts/review_ledger.py .github/scripts/summarize_claude_usage.py "${RUNNER_TEMP}/scripts/"
           LEDGER="${RUNNER_TEMP}/scripts/review_ledger.py"
 
           # The ledger is memory, not the review: if recovering it fails, the
           # round runs as a full round rather than not at all.
-          if ! summary=$(python3 "$LEDGER" extract \
+          if ! summary=$(python3 -I "$LEDGER" extract \
               "${RUNNER_TEMP}/previous-review.md" --out previous-findings.json); then
             echo "::warning::review_ledger.py extract failed; running a full round without the previous ledger."
             summary='{"found": false}'
             rm -f previous-findings.json
           fi
-          # The reviewer reads previous-findings.json in the workspace, where it
-          # can also write. The post step builds the next ledger from this copy
-          # instead, so nothing written there can drop or renumber a previous
-          # finding.
+          # The reviewer reads previous-findings.json in the workspace. The post
+          # step builds the next ledger from this copy instead, checked against
+          # the digest taken here, so nothing that happens to the workspace copy
+          # can drop or renumber a previous finding.
+          ledger_sha256=
           if [ -f previous-findings.json ]; then
             cp previous-findings.json "${RUNNER_TEMP}/previous-findings.json"
+            ledger_sha256=$(sha256sum "${RUNNER_TEMP}/previous-findings.json" | cut -d' ' -f1)
           fi
           echo "Previous ledger: $summary"
           found=$(jq -r '.found' <<<"$summary")
@@ -173,9 +283,9 @@ jobs:
           # stopped reading (its ledger records the time), so a comment posted
           # while that round was running is not lost; the previous review's
           # timestamp is the fallback for a ledger that predates the field.
-          # Only people with a role in the repository are read: this is a
-          # public repository, the text goes verbatim into the reviewer's
-          # context, and the reviewer holds a token that can write to the PR.
+          # Only people with a role in the repository are read: the text goes
+          # verbatim into the reviewer's context, and the reviewer holds a
+          # token that can write to the PR.
           # Best-effort throughout: the review can run without any of it.
           since=$(jq -r '.comments_fetched_at // empty' <<<"$summary")
           since="${since:-$LATEST_REVIEW_AT}"
@@ -232,6 +342,7 @@ jobs:
             echo "round=$round"
             echo "scope=$scope"
             echo "fetched_at=$fetched_at"
+            echo "ledger_sha256=$ledger_sha256"
             echo "context<<ROUND_EOF"
             echo "ROUND CONTEXT"
             echo "This is review round $round on this PR."
@@ -269,7 +380,7 @@ jobs:
         id: collector
         continue-on-error: true
         env:
-          CONFIG: ${{ github.workspace }}/.github/otel/collector-config.yaml
+          CONFIG: ${{ runner.temp }}/otel/collector-config.yaml
         run: |
           if [ ! -f "$CONFIG" ]; then
             echo "::warning::$CONFIG is missing; running the review without token accounting."
@@ -306,29 +417,64 @@ jobs:
       - name: Run github-pr-review skill
         id: claude
         uses: anthropics/claude-code-action@v1
-        env:
-          GH_TOKEN: ${{ github.token }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # github.token, not the Claude GitHub App's token, which the action
+          # otherwise gets by exchanging an OIDC token. The action hands its
+          # token to the reviewer as GH_TOKEN, and the reviewer's gh commands
+          # are the only thing that would use the app's: this workflow posts
+          # with github.token either way. The app token carries contents:
+          # write, which a read-only reviewer has no use for; it needs the app
+          # installed on every consumer; and the exchange checks that the
+          # workflow file matches the default branch, which skips the review
+          # on any PR that edits the caller.
+          github_token: ${{ github.token }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Read the file .claude/skills/github-pr-review/SKILL.md and follow it
+            Read the file ${{ runner.temp }}/skill/SKILL.md and follow it
             exactly to review this pull request. The PR branch is already checked
             out in the current working directory. Use the REPO and PR NUMBER above
             for the skill's `gh pr view` and `gh pr diff` calls.
-
-            Do not read the PR's comments or reviews with `gh pr view`
-            (`--comments`, or `--json` with comments or reviews). What people
-            with a role in the repository wrote is in author-comments.md, and
-            the rest is not input to this review.
 
             The checkout has full history but is on a detached HEAD, so a bare
             branch name will not resolve. Where the skill says `git show
             <headRef>:<path>`, use `git show HEAD:<path>` or just Read the file.
             To see the pre-change state of the code, diff against the remote-
             tracking ref: `git diff origin/${{ github.event.pull_request.base.ref }}...HEAD`.
+
+            TOOLING CONSTRAINTS (a read-only review in a restricted sandbox):
+            - There are no Grep or Glob tools here. Read files with the Read
+              tool, and search with `grep` and `find` in the shell, which run
+              without asking. Reading and searching work inside the checkout
+              and on the skill file above, and nowhere else.
+            - The shell commands available are `gh pr view`, `gh pr diff`,
+              `gh pr checks`, `git show`, `git log` and `git diff`, plus
+              read-only commands such as `grep`, `find`, `cat`, `head`, `ls`
+              and `wc` on paths inside the checkout. Anything else is denied
+              and wastes a turn, and so is a git command that writes a file
+              (`--output`), names a path outside the checkout, or uses a `$`
+              variable.
+            - Do NOT execute code: no `python3`, no `pip`, no running the app
+              or the test suite. The repository's dependencies are not
+              installed on this runner, so their source is not here to read.
+              CI results for HEAD are available with `gh pr checks`; you
+              cannot run the tests yourself. A failing check on code you
+              reviewed is worth a should-fix; a check still running is not a
+              finding.
+            - The only files you can write are review.md and findings.json in
+              the working directory.
+            - Do not read the PR's comments or reviews with `gh pr view`
+              (`--comments`, or `--json` with comments or reviews). What people
+              with a role in the repository wrote is in author-comments.md, and
+              the rest is not input to this review.
+            - If you cannot confirm something without executing code or reading
+              a dependency, state the assumption and raise it as a [Q] finding
+              rather than trying to run it, but only when a wrong assumption
+              would be a real bug: a [Q] stays open in the ledger, round after
+              round, until someone answers it.
+            ${{ inputs.tooling_constraints }}
 
             IMPORTANT OVERRIDE: this run is non-interactive. The skill says to
             present the review and wait to be asked before posting. Do NOT wait,
@@ -357,25 +503,50 @@ jobs:
           # everything. Full rounds on lattice-tools' largest PRs took 36-47
           # requests under the old skill.
           #
-          # effort is pinned because Opus 5.5 defaults to medium where Opus 5
-          # defaulted to high; without the pin the model switch would also be
-          # a silent change in how hard the reviewer looks.
+          # effort defaults to high because Opus 5.5 defaults to medium where
+          # Opus 5 defaulted to high; without it the model switch would also
+          # have been a silent change in how hard the reviewer looks.
           #
-          # The tool allowlist is read-only apart from Write: `gh api` is not in
-          # it because it accepts any method under a token that can write to
-          # the PR, and the reviewer now reads PR comments, which anyone with a
-          # role in the repository can write. Everything the skill needs from
-          # the API comes through `gh pr view` and `gh pr diff`. `gh pr view` is
-          # denied the comment and review fields for the same reason: the round
-          # step hands the reviewer what people with a role wrote, and nothing
-          # else. (-c is the short form of --comments; latestReviews is the one
-          # review field "reviews" does not match.)
+          # The permissions. The TOOLING CONSTRAINTS in the prompt describe
+          # them to the reviewer, which cannot see this list: change the two
+          # together.
+          #
+          # There is no bare Read, Write, Grep or Glob, because a bare rule
+          # reaches the whole filesystem: bare Write could rewrite the scripts
+          # staged in $RUNNER_TEMP, which later steps run with the repo token,
+          # and bare Read could copy the process environment or .git/config's
+          # token into a review that is posted in public. Without them, the
+          # Read tool and Claude Code's read-only shell commands (grep, find,
+          # cat) work inside the checkout and the skill's --add-dir directory
+          # and ask - which, unattended, means fail - everywhere else, and the
+          # two Edit rules let the reviewer write review.md and findings.json
+          # and nothing else. (Claude Code on Linux has no Grep or Glob tool;
+          # the reviewer searches with grep and find.)
+          #
+          # gh api is not allowed because it accepts any method under a token
+          # that can write to the PR. `gh pr view` is denied the comment and
+          # review fields because the round step hands the reviewer what
+          # people with a role wrote, and nothing else. (-c is the short form
+          # of --comments; latestReviews is the one review field "reviews"
+          # does not match.) The git deny rules close what the git allow rules
+          # would let through: --output writes a file anywhere; a path outside
+          # the checkout (absolute, ../ or ~) turns git diff into a reader of
+          # any file; and a $ expands the environment into the output. echo is
+          # denied for the same reason, since it is one of the read-only
+          # commands that need no allow rule. Read(.git/**) keeps the checkout
+          # token in .git/config out of cat and Read.
+          #
+          # The deny list is single-quoted because the action splits these
+          # lines with shell-quote, which expands $ inside double quotes:
+          # "Bash(git *$*)" would arrive as "Bash(git *", taking the next rule
+          # with it.
           claude_args: |
             --model claude-opus-5-5
-            --effort high
-            --max-turns 120
-            --allowedTools "Read,Write,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(git show:*),Bash(git log:*),Bash(git diff:*)"
-            --disallowedTools "Bash(gh pr view *comments*),Bash(gh pr view *reviews*),Bash(gh pr view *Reviews*),Bash(gh pr view *-c*)"
+            --effort ${{ inputs.effort }}
+            --max-turns ${{ inputs.max_turns }}
+            --add-dir ${{ runner.temp }}/skill
+            --allowedTools "Edit(/review.md),Edit(/findings.json),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(git show:*),Bash(git log:*),Bash(git diff:*)"
+            --disallowedTools 'Bash(gh pr view *comments*),Bash(gh pr view *reviews*),Bash(gh pr view *Reviews*),Bash(gh pr view *-c*),Bash(git * --output*),Bash(git *--no-index*),Bash(git * /*),Bash(git * ../*),Bash(git * ~*),Bash(git *$*),Bash(echo *),Read(.git/**)'
           # Telemetry for the Claude Code process this action spawns, which
           # reads it from the settings env block. All values must be strings.
           # OTEL_EXPORTER_OTLP_PROTOCOL has no default in Claude Code, and
@@ -383,8 +554,16 @@ jobs:
           # are far below the defaults (60s metrics, 5s logs) because a quick
           # review can finish before the first flush would have happened, and
           # unexported counters die with the process.
+          #
+          # blockReadsOutsideWorkingDirectories makes the file tools refuse
+          # reads outside the checkout and --add-dir in every permission mode,
+          # so the fence above holds even if the action ever runs Claude Code
+          # in a mode that would not ask.
           settings: |
             {
+              "permissions": {
+                "blockReadsOutsideWorkingDirectories": true
+              },
               "env": {
                 "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
                 "OTEL_METRICS_EXPORTER": "otlp",
@@ -414,24 +593,19 @@ jobs:
           wc -l "${RUNNER_TEMP}/otel-out/claude-telemetry.jsonl" \
             || echo "no telemetry file was written"
 
-      # claude-code-action refuses to run when this file differs from the copy on
-      # the default branch - a guard against a PR rewriting the review workflow to
-      # leak secrets - and it still exits success when it does. That is every PR
-      # that edits this workflow, so treat it as a skip, not a missing review.
-      # execution_file is set only when Claude actually ran.
-      - name: Note the skipped review
-        if: steps.claude.outputs.execution_file == ''
-        run: |
-          echo "::notice::Claude Code skipped this run: this workflow file differs from the copy on ${{ github.event.repository.default_branch }}. Expected on PRs that edit the workflow; it resolves once they merge. No review was posted and none were collapsed."
-
       # !cancelled() rather than the implicit success(): a reviewer that runs
       # out of turns fails the claude step after writing review.md, and what it
-      # wrote is still worth posting. execution_file is set either way.
+      # wrote is still worth posting. execution_file is set whenever Claude
+      # ran, and empty when the action failed before it could.
       - name: Post the new review
         id: post
         if: ${{ !cancelled() && steps.claude.outputs.execution_file != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          TOOLING_MANIFEST: ${{ steps.tooling.outputs.manifest }}
+          LEDGER_SHA256: ${{ steps.round.outputs.ledger_sha256 }}
+          # Only so the body can be checked for it before it is posted.
+          CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           # -s alone is not enough: a review of only whitespace would post as
           # an empty comment that the next round took for the newest review.
@@ -439,18 +613,36 @@ jobs:
             echo "::error::Claude produced no review.md; leaving the existing review comments in place."
             exit 1
           fi
+          # The script and the previous ledger are the copies staged before the
+          # reviewer ran, checked against the digests taken then. A mismatch
+          # means something wrote where the reviewer's permissions say nothing
+          # can, so nothing is run and nothing is posted.
+          if ! (cd "$RUNNER_TEMP" && sha256sum --check --quiet --strict <<<"$TOOLING_MANIFEST"); then
+            echo "::error::the review scripts changed after they were staged; refusing to run them."
+            exit 1
+          fi
+          previous="${RUNNER_TEMP}/previous-findings.json"
+          if [ -n "$LEDGER_SHA256" ]; then
+            if ! sha256sum --check --quiet --strict <<<"$LEDGER_SHA256  $previous"; then
+              echo "::error::the previous ledger changed after it was staged; refusing to post."
+              exit 1
+            fi
+          elif [ -e "$previous" ]; then
+            echo "::error::a previous ledger appeared after the round step found none; refusing to post."
+            exit 1
+          fi
           # Marker first, then the ledger for the next round to read back, then
           # the review, then a footer with the round, the open/settled counts
           # and how to decline a finding. A missing or broken findings.json is
           # noted in the comment and the previous ledger is carried forward, so
-          # the review still posts and no finding is lost. The script and the
-          # previous ledger are the copies taken before the reviewer ran, never
-          # the workspace's.
+          # the review still posts and no finding is lost. -I keeps Python from
+          # reading PYTHON* variables, which a step's environment can inherit
+          # from anything that wrote to GITHUB_ENV before it.
           set +e
-          python3 "${RUNNER_TEMP}/scripts/review_ledger.py" embed \
+          python3 -I "${RUNNER_TEMP}/scripts/review_ledger.py" embed \
             --review review.md \
             --findings findings.json \
-            --previous "${RUNNER_TEMP}/previous-findings.json" \
+            --previous "$previous" \
             --round "${{ steps.round.outputs.round }}" \
             --head-sha "${{ github.event.pull_request.head.sha }}" \
             --comments-fetched-at "${{ steps.round.outputs.fetched_at }}" \
@@ -475,6 +667,15 @@ jobs:
               { printf '%s\n\n' "$REVIEW_MARKER"; cat review.md; } > review-body.md
               ;;
           esac
+          # The last check before the review goes public. The reviewer cannot
+          # read either token, but should that ever change, a review carrying
+          # one is not posted.
+          for secret in "$GH_TOKEN" "$CLAUDE_TOKEN"; do
+            if [ -n "$secret" ] && grep -qF -- "$secret" review-body.md; then
+              echo "::error::the review contains a credential; refusing to post it."
+              exit 1
+            fi
+          done
           gh pr comment "${{ github.event.pull_request.number }}" \
             --repo "${{ github.repository }}" \
             --body-file review-body.md
@@ -535,15 +736,18 @@ jobs:
         continue-on-error: true
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          TOOLING_MANIFEST: ${{ steps.tooling.outputs.manifest }}
         run: |
           # Exits 0 even with nothing to report, so this can never fail the job.
           # PR_ADDITIONS/DELETIONS/CHANGED_FILES arrive via GITHUB_ENV above and
           # are simply absent from the report if that step could not resolve them.
-          # From the copy taken before the reviewer ran (see the round step);
-          # the checkout copy is the fallback if that step never got there.
-          SUMMARIZE="${RUNNER_TEMP}/scripts/summarize_claude_usage.py"
-          [ -f "$SUMMARIZE" ] || SUMMARIZE=.github/scripts/summarize_claude_usage.py
-          python3 "$SUMMARIZE" \
+          # From the copy staged before the reviewer ran, and only if it still
+          # matches the digest taken then.
+          if ! (cd "$RUNNER_TEMP" && sha256sum --check --quiet --strict <<<"$TOOLING_MANIFEST"); then
+            echo "::warning::the staged scripts are missing or changed; no usage report."
+            exit 0
+          fi
+          python3 -I "${RUNNER_TEMP}/scripts/summarize_claude_usage.py" \
             "${RUNNER_TEMP}/otel-out/claude-telemetry.jsonl" \
             "${RUNNER_TEMP}/usage-report.md"
           cat "${RUNNER_TEMP}/usage-report.md" >> "${GITHUB_STEP_SUMMARY}"
@@ -562,8 +766,8 @@ jobs:
 
       # One comment per run: each review leaves its own usage report on the PR
       # rather than overwriting the previous one. Skipped when Claude never ran
-      # at all, since "no telemetry" would then read as a broken exporter rather
-      # than as the deliberate skip noted above.
+      # at all, since "no telemetry" would then read as a broken exporter
+      # rather than as a failure the job already reports.
       - name: Post the usage comment
         if: always() && steps.claude.outputs.execution_file != ''
         continue-on-error: true

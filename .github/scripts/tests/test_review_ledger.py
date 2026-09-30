@@ -224,8 +224,8 @@ def test_ledger_without_a_findings_list_is_not_found(tmp_path):
 
 def test_extract_drops_malformed_entries_and_keeps_the_rest(tmp_path):
     bad = {
-        "id": "F2",
-        "severity": "urgent",
+        "id": "F2x",
+        "severity": "should-fix",
         "status": "open",
         "path": "p",
         "title": "t",
@@ -241,6 +241,20 @@ def test_extract_drops_malformed_entries_and_keeps_the_rest(tmp_path):
     _, summary, recovered = extract(tmp_path, body)
     assert summary["findings"] == 1
     assert [f["id"] for f in recovered["findings"]] == ["F1"]
+
+
+def test_extract_keeps_an_entry_whose_severity_it_does_not_know(tmp_path):
+    body = f"{MARKER}\n" + ledger.ledger_comment(
+        {
+            "schema": 1,
+            "round": 1,
+            "head_sha": "abc1234",
+            "findings": [finding("F1"), finding("F2", severity="urgent")],
+        }
+    )
+    _, summary, recovered = extract(tmp_path, body)
+    assert summary["findings"] == 2
+    assert recovered["findings"][1]["severity"] == ledger.FALLBACK_SEVERITY
 
 
 def test_extract_drops_a_doctored_head_sha_and_timestamp(tmp_path):
@@ -326,14 +340,53 @@ def test_duplicate_ids_keep_the_first(tmp_path):
 
 
 def test_malformed_entries_are_dropped_with_a_visible_note(tmp_path):
-    reported = [finding("F1"), {"id": "F2", "severity": "should-fix"}]
+    """Only an entry with no usable ID is dropped: there is no ID to keep."""
+    reported = [finding("F1"), "F2"]
     _, body = embed(tmp_path, findings=reported, round_no=1)
     assert [f["id"] for f in _ledger_in(body)["findings"]] == ["F1"]
     assert "1 malformed ledger entry was dropped this round" in body
 
-    reported = [finding("F1"), {"id": "F2"}, {"id": "F3", "status": "open"}]
+    reported = [finding("F1"), "F2", {"id": "F-3", "status": "open"}]
     _, body = embed(tmp_path, findings=reported, round_no=1)
     assert "2 malformed ledger entries were dropped this round" in body
+
+
+def test_an_unknown_severity_or_status_keeps_the_entry_and_its_id(tmp_path):
+    """Dropping F2 over a severity the ledger does not know would leave the
+    review text naming an F2 the ledger lacks, and the next round, counting
+    from the highest ID it can see, would hand F2 to a different finding."""
+    reported = [
+        finding("F1"),
+        finding("F2", severity="critical"),
+        finding("F3", status="partially-fixed"),
+        {"id": "F4"},
+    ]
+    _, body = embed(tmp_path, findings=reported, round_no=1)
+    got = {f["id"]: f for f in _ledger_in(body)["findings"]}
+    assert sorted(got) == ["F1", "F2", "F3", "F4"]
+    for fid in ("F2", "F3", "F4"):
+        assert (got[fid]["severity"], got[fid]["status"]) == (
+            ledger.FALLBACK_SEVERITY,
+            ledger.FALLBACK_STATUS,
+        )
+    assert "malformed" not in body
+
+    _, _, recovered = extract(tmp_path, body)
+    assert [f["id"] for f in recovered["findings"]] == ["F1", "F2", "F3", "F4"]
+
+
+def test_an_unknown_value_on_a_known_finding_keeps_the_previous_one(tmp_path):
+    previous = [
+        finding("F1", severity="nit", status="declined", note="author: by design")
+    ]
+    reported = [finding("F1", severity="minor", status="acknowledged")]
+    _, body = embed(tmp_path, findings=reported, previous=previous, round_no=2)
+    got = _ledger_in(body)["findings"][0]
+    assert (got["severity"], got["status"], got["note"]) == (
+        "nit",
+        "declined",
+        "author: by design",
+    )
 
 
 def test_missing_path_or_title_keeps_the_entry_with_a_placeholder(tmp_path):
@@ -449,6 +502,49 @@ def test_oversized_review_text_is_truncated_but_ledger_and_footer_survive(tmp_pa
     assert _ledger_in(body)["findings"][0]["id"] == "F1"
     assert ledger.TRUNCATION_NOTICE.strip() in body
     assert "<sub>Round 1, reviewed at" in body
+
+
+def test_long_titles_and_notes_are_clipped(tmp_path):
+    reported = [finding("F1", title="t" * 1000, note="n" * 1000)]
+    _, body = embed(tmp_path, findings=reported, round_no=1)
+    got = _ledger_in(body)["findings"][0]
+    assert len(got["title"]) == ledger.MAX_TITLE_CHARS
+    assert len(got["note"]) == ledger.MAX_NOTE_CHARS
+    assert got["title"].endswith("...")
+
+
+def test_an_oversized_ledger_sheds_the_prose_of_settled_findings(tmp_path):
+    """The ledger never forgets a finding, so a long-lived PR outgrows the
+    comment limit; resolved findings give up their notes first, and every ID
+    and every author's reason survives."""
+    resolved = [
+        finding(f"F{n}", status="resolved", title="t" * 200, note="n" * 400)
+        for n in range(1, 101)
+    ]
+    declined = finding("F101", status="declined", note="author: by design")
+    still_open = finding("F102", note="n" * 400)
+    code, body = embed(tmp_path, findings=resolved + [declined, still_open], round_no=1)
+    assert code == 0
+    assert len(body) <= 65_536
+    got = {f["id"]: f for f in _ledger_in(body)["findings"]}
+    assert len(got) == 102
+    assert got["F1"]["note"] is None
+    assert len(got["F1"]["title"]) == ledger.SHORT_TITLE_CHARS
+    assert got["F101"]["note"] == "author: by design"
+    assert got["F102"]["note"] == "n" * 400
+    assert "100 settled findings were shortened" in body
+
+
+def test_a_ledger_too_large_even_compacted_is_refused(tmp_path):
+    """Nothing open can be shortened away, so the script refuses rather than
+    write a comment GitHub would reject; the workflow then posts bare and the
+    previous ledger stays the memory."""
+    reported = [
+        finding(f"F{n}", title="t" * 200, note="n" * 400) for n in range(1, 101)
+    ]
+    code, body = embed(tmp_path, findings=reported, round_no=1)
+    assert code == ledger.EXIT_LEDGER_TOO_LARGE == 4
+    assert body == ""
 
 
 def test_a_bare_list_and_a_whole_ledger_object_are_both_accepted_as_previous(tmp_path):

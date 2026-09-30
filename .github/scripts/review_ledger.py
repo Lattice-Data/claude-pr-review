@@ -30,7 +30,9 @@ Two subcommands, both invoked by the workflow:
         the previous ledger with a visible note, so a round that produced a
         readable review but a broken ledger still posts and loses no state.
         Exits 3 when the review itself is empty, so the workflow can refuse
-        to post rather than fall back to a bare post.
+        to post rather than fall back to a bare post. Exits 4 when even a
+        compacted ledger would not fit in a comment, so the workflow posts
+        the review bare and the previous comment's ledger stays the memory.
 
 Everything the reviewer can get wrong about the ledger is handled here rather
 than trusted. The reviewer is a model with a diff to read and a turn budget to
@@ -106,6 +108,24 @@ TRUNCATION_NOTICE = "\n\n*(review text truncated to fit GitHub's comment size li
 MISSING_PATH = "."
 MISSING_TITLE = "(no title recorded)"
 
+# Stand-ins for a severity or status the ledger does not know, for the same
+# reason: dropping the entry would orphan its ID, and the next round would hand
+# that ID to a different finding. should-fix and open are the values that get
+# the finding checked again next round; a nit, question or pre-existing entry
+# would only be counted.
+FALLBACK_SEVERITY = "should-fix"
+FALLBACK_STATUS = "open"
+
+# The ledger keeps every finding ever raised on the PR, so it only grows.
+# Reviewer-written text is capped per entry, and past LEDGER_BUDGET resolved
+# and withdrawn findings lose their notes and long titles, which neither their
+# IDs nor their history needs. Declined findings keep their notes: the note is
+# the author's reason.
+MAX_TITLE_CHARS = 200
+MAX_NOTE_CHARS = 400
+SHORT_TITLE_CHARS = 80
+LEDGER_BUDGET = 48_000
+
 DECLINE_HINT = (
     "To decline a finding, reply in the PR conversation with its ID, for "
     "example `F3: by design, <reason>`. A declined finding is not raised again."
@@ -115,6 +135,10 @@ DECLINE_HINT = (
 # "post the review bare". Not 2, which is what Python itself exits with for a
 # usage error or a script it cannot open, and which must fall back, not refuse.
 EXIT_EMPTY_REVIEW = 3
+# Exit code for a ledger too large for a comment even compacted. The workflow
+# posts the review bare, as for any other failure, and the next round reads the
+# previous comment's ledger, so no finding is lost.
+EXIT_LEDGER_TOO_LARGE = 4
 
 
 def warn(message: str) -> None:
@@ -159,6 +183,37 @@ def ledger_comment(ledger: dict) -> str:
     return f"{LEDGER_PREFIX}{escape_for_comment(blob)}{LEDGER_SUFFIX}"
 
 
+class LedgerTooLarge(Exception):
+    pass
+
+
+def fit_ledger(ledger: dict) -> int:
+    """Shorten settled findings until the ledger comment fits LEDGER_BUDGET.
+
+    Returns how many entries were shortened. Raises LedgerTooLarge when the
+    ledger is still over budget with every resolved and withdrawn finding
+    shortened: GitHub would reject the comment, and nothing else here can go.
+    """
+    if len(ledger_comment(ledger)) <= LEDGER_BUDGET:
+        return 0
+    shortened = 0
+    for finding in ledger["findings"]:
+        if finding["status"] not in ("resolved", "withdrawn"):
+            continue
+        title = _clip(finding["title"], SHORT_TITLE_CHARS)
+        if finding["note"] is not None or title != finding["title"]:
+            finding["note"] = None
+            finding["title"] = title
+            shortened += 1
+    size = len(ledger_comment(ledger))
+    if size > LEDGER_BUDGET:
+        raise LedgerTooLarge(
+            f"the ledger is {size:,} characters with its settled findings "
+            f"shortened, over the {LEDGER_BUDGET:,} a review comment can spare"
+        )
+    return shortened
+
+
 def find_ledger(body: str) -> tuple[dict | None, str]:
     """The ledger on the second line of a review comment, or (None, why not).
 
@@ -184,8 +239,8 @@ def find_ledger(body: str) -> tuple[dict | None, str]:
 
 # ---------------------------------------------------------------------------
 # Validation. One entry at a time, so one malformed finding costs that finding
-# and not the round's whole ledger; and a blank field costs a placeholder, not
-# the finding.
+# and not the round's whole ledger; and a blank or unrecognised field costs a
+# placeholder, not the finding.
 # ---------------------------------------------------------------------------
 
 
@@ -214,26 +269,45 @@ def _text(value) -> str | None:
     return None
 
 
-def clean_finding(raw, position: int) -> tuple[dict | None, list[str]]:
-    """A finding in canonical shape plus warnings, or (None, [why dropped])."""
+def _clip(text: str | None, limit: int) -> str | None:
+    if text is None or len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def clean_finding(
+    raw, position: int, known: dict | None = None
+) -> tuple[dict | None, list[str]]:
+    """A finding in canonical shape plus warnings, or (None, [why dropped]).
+
+    `known` maps IDs to the previous round's entries. A severity or status
+    this ledger does not recognise falls back to the previous entry's value
+    when there is one, and to FALLBACK_SEVERITY or FALLBACK_STATUS when there
+    is not, rather than costing the finding its place and its ID.
+    """
     if not isinstance(raw, dict):
         return None, [f"entry {position} is not an object"]
     finding_id = str(raw.get("id", "")).strip()
     if not ID_RE.match(finding_id):
         return None, [f"entry {position} has no valid id (got {raw.get('id')!r})"]
+    prior = (known or {}).get(finding_id)
+    warnings = []
     severity = _word(raw.get("severity"))
     severity = SEVERITY_SYNONYMS.get(severity, severity)
     if severity not in SEVERITIES:
-        return None, [
-            f"{finding_id}: severity {raw.get('severity')!r} is not one of {SEVERITIES}"
-        ]
+        severity = prior["severity"] if prior else FALLBACK_SEVERITY
+        warnings.append(
+            f"{finding_id}: severity {raw.get('severity')!r} is not one of "
+            f"{SEVERITIES}; recorded as {severity!r}"
+        )
     status = _word(raw.get("status"))
     status = STATUS_SYNONYMS.get(status, status)
     if status not in STATUSES:
-        return None, [
-            f"{finding_id}: status {raw.get('status')!r} is not one of {STATUSES}"
-        ]
-    warnings = []
+        status = prior["status"] if prior else FALLBACK_STATUS
+        warnings.append(
+            f"{finding_id}: status {raw.get('status')!r} is not one of "
+            f"{STATUSES}; recorded as {status!r}"
+        )
     path = _text(raw.get("path"))
     if path is None:
         path = MISSING_PATH
@@ -242,6 +316,7 @@ def clean_finding(raw, position: int) -> tuple[dict | None, list[str]]:
     if title is None:
         title = MISSING_TITLE
         warnings.append(f"{finding_id}: no title recorded")
+    title = _clip(title, MAX_TITLE_CHARS)
     first_round = raw.get("first_round")
     if (
         isinstance(first_round, bool)
@@ -256,16 +331,18 @@ def clean_finding(raw, position: int) -> tuple[dict | None, list[str]]:
         "path": path,
         "line": _line(raw.get("line")),
         "title": title,
-        "note": _text(raw.get("note")),
+        "note": _clip(_text(raw.get("note")), MAX_NOTE_CHARS),
         "first_round": first_round,
     }, warnings
 
 
-def clean_all(entries: list) -> tuple[list[dict], list[str], list[str]]:
+def clean_all(
+    entries: list, known: dict | None = None
+) -> tuple[list[dict], list[str], list[str]]:
     """Return (findings, reasons entries were dropped, repair warnings)."""
     findings, dropped, repaired = [], [], []
     for position, raw in enumerate(entries, start=1):
-        finding, messages = clean_finding(raw, position)
+        finding, messages = clean_finding(raw, position, known)
         if finding is None:
             dropped.extend(messages)
         else:
@@ -494,7 +571,9 @@ def cmd_embed(args: argparse.Namespace) -> int:
         else:
             notes.append("The reviewer did not record a findings ledger this round.")
     else:
-        reported, dropped, repaired = clean_all(reported_raw)
+        reported, dropped, repaired = clean_all(
+            reported_raw, {f["id"]: f for f in previous}
+        )
         for message in dropped + repaired:
             warn(f"findings.json: {message}")
         if dropped:
@@ -532,6 +611,16 @@ def cmd_embed(args: argparse.Namespace) -> int:
             warn(
                 f"ignoring malformed --comments-fetched-at {args.comments_fetched_at!r}"
             )
+    try:
+        shortened = fit_ledger(ledger)
+    except LedgerTooLarge as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        return EXIT_LEDGER_TOO_LARGE
+    if shortened:
+        notes.append(
+            f"{plural(shortened, 'settled finding was', 'settled findings were')} "
+            "shortened to keep the ledger within GitHub's comment limit."
+        )
     body = assemble(
         args.marker,
         ledger,

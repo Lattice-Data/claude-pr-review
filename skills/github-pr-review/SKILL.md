@@ -74,7 +74,7 @@ Respect existing conventions over personal preference. If the repo has a linter 
 
 When the diff alone is not enough to judge correctness (e.g. a changed function calls something not shown), read the full file from the local checkout if the repo is available, or `git show <headRef>:<path>`. If you still cannot tell, say so and mark it as a Question rather than guessing.
 
-When investigating files beyond the diff, limit deep reading to the files most relevant to correctness and security. Skip full investigation of the rest, and note in a Question that they were not reviewed in full rather than reading everything.
+When investigating files beyond the diff, limit deep reading to the files most relevant to correctness and security. Skip full investigation of the rest, and list them under the verdict as not reviewed in full rather than reading everything. Not as a Question: a Question takes a ledger ID and stays open until someone answers it.
 
 For large diffs: prioritize files with real logic changes. Skim generated code, lockfiles, and vendored dependencies, and say you skimmed them rather than reviewing line by line.
 

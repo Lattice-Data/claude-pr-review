@@ -516,8 +516,9 @@ jobs:
           # There is no bare Read, Write, Grep or Glob, because a bare rule
           # reaches the whole filesystem: bare Write could rewrite the scripts
           # staged in $RUNNER_TEMP, which later steps run with the repo token,
-          # and bare Read could copy the process environment or .git/config's
-          # token into a review that is posted in public. Without them, the
+          # and bare Read could copy the process environment, or the checkout's
+          # token (actions/checkout v6 keeps it in a file under $RUNNER_TEMP),
+          # into a review that is posted in public. Without them, the
           # Read tool and Claude Code's read-only shell commands (grep, find,
           # cat) work inside the checkout and the skill's --add-dir directory
           # and ask - which, unattended, means fail - everywhere else, and the
@@ -537,8 +538,10 @@ jobs:
           # the checkout (absolute, ../ or ~) turns git diff into a reader of
           # any file; and a $ expands the environment into the output. echo is
           # denied for the same reason, since it is one of the read-only
-          # commands that need no allow rule. Read(.git/**) keeps the checkout
-          # token in .git/config out of cat and Read.
+          # commands that need no allow rule. Read(.git/**) keeps git's own
+          # files out of cat, grep and Read: .git/config names the file that
+          # holds the checkout's token, and older checkouts kept the token
+          # itself there.
           #
           # The deny list is single-quoted because the action splits these
           # lines with shell-quote, which expands $ inside double quotes:

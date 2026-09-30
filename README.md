@@ -104,7 +104,8 @@ logs), so its permissions assume the reviewer may be steered:
 - It reads files and searches (`grep`, `find`, `cat` and the other read-only
   commands) inside the checkout and its own skill file, and nowhere else: not
   `.git/` (git commands still work), and not the rest of the runner, such as
-  the process environment, the staged scripts or the runner's own files.
+  the process environment, the checkout's token, the staged scripts or the
+  runner's own files.
 - Its shell is `gh pr view`, `gh pr diff`, `gh pr checks`, `git show`,
   `git log` and `git diff`. A git command that writes a file (`--output`),
   names a path outside the checkout, or expands a `$` variable is denied, and

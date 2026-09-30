@@ -127,7 +127,7 @@ jobs:
           fi
 
       - name: Check out the PR branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           # Full history, not a depth-1 snapshot. A shallow checkout leaves the
@@ -146,7 +146,7 @@ jobs:
       # job.workflow_sha name the called workflow; github.workflow_sha would be
       # the caller's commit, which this repository does not have.
       - name: Check out the review tooling
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -517,7 +517,7 @@ jobs:
           # reaches the whole filesystem: bare Write could rewrite the scripts
           # staged in $RUNNER_TEMP, which later steps run with the repo token,
           # and bare Read could copy the process environment, or the checkout's
-          # token (actions/checkout v6 keeps it in a file under $RUNNER_TEMP),
+          # token (actions/checkout keeps it in a file under $RUNNER_TEMP),
           # into a review that is posted in public. Without them, the
           # Read tool and Claude Code's read-only shell commands (grep, find,
           # cat) work inside the checkout and the skill's --add-dir directory
@@ -771,10 +771,11 @@ jobs:
       - name: Upload raw telemetry
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          # run_attempt is in the name because v4 rejects an upload whose name
-          # already exists in the run, which is every re-run of a failed job.
+          # run_attempt is in the name because upload-artifact rejects an upload
+          # whose name already exists in the run, which is every re-run of a
+          # failed job.
           name: claude-telemetry-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/otel-out/claude-telemetry.jsonl
           if-no-files-found: warn

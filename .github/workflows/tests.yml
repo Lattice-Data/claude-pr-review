@@ -1,0 +1,65 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is the python3 the review job runs the scripts with on
+        # ubuntu-24.04. 3.14 is the newest, and the likeliest python3 of the
+        # next ubuntu-latest.
+        python-version: ["3.12", "3.14"]
+    defaults:
+      run:
+        shell: bash
+        working-directory: .github/scripts
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install pytest==9.1.1 pyyaml==6.0.3
+      # The workflow tests run the review's shell with the runner's own bash,
+      # jq, git and GNU coreutils, and lint it with shellcheck. Those tests
+      # skip rather than fail when a tool is missing, which is right on a
+      # laptop and wrong here, so a missing tool fails this step instead.
+      - name: Check the tools the workflow tests need
+        run: |
+          bash --version | head -n 1
+          jq --version
+          git --version
+          date --version | head -n 1
+          shellcheck --version | head -n 2
+      - run: python -m pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # The ruff lattice-tools pins, whose style this repository keeps.
+      - run: python -m pip install ruff==0.16.1
+      - run: ruff format --check .
+      - run: ruff check .
+      # actionlint 1.7.12 predates job.workflow_repository, job.workflow_sha
+      # and job.workflow_ref, which GitHub added on 2026-04-23, and reports
+      # each as an unknown property. Only those three are ignored; drop the
+      # -ignore once a release knows them.
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color \
+            -ignore 'property "workflow_(repository|sha|ref)" is not defined in object type' \
+            .github/workflows/review.yml .github/workflows/tests.yml \
+            callers/lattice-tools.yml callers/igvfd.yml

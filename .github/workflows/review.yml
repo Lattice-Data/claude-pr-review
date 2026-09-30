@@ -273,7 +273,9 @@ jobs:
           merges=0
           if [ "$found" = true ] && [ -n "$last_sha" ] \
               && git merge-base --is-ancestor "$last_sha" HEAD 2>/dev/null; then
-            scope=delta
+            # Quoted only because shellcheck takes a bare `delta` for the
+            # command of that name.
+            scope="delta"
             merges=$(git rev-list --merges --count "$last_sha..HEAD")
           fi
 
@@ -692,6 +694,9 @@ jobs:
         run: |
           printf '%s\n' "$STALE_NODE_IDS" | while read -r node_id; do
             [ -n "$node_id" ] || continue
+            # $subjectId is a GraphQL variable, which gh fills in from -f; the
+            # shell must leave it alone.
+            # shellcheck disable=SC2016
             if gh api graphql --silent \
                 -f subjectId="$node_id" \
                 -f query='mutation($subjectId: ID!) { minimizeComment(input: {subjectId: $subjectId, classifier: OUTDATED}) { minimizedComment { isMinimized } } }'; then
@@ -720,13 +725,13 @@ jobs:
           if sizes=$(gh api \
               "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
               --jq '"\(.additions) \(.deletions) \(.changed_files)"'); then
-            set -- $sizes
+            read -r additions deletions changed_files <<<"$sizes"
             {
-              echo "PR_ADDITIONS=$1"
-              echo "PR_DELETIONS=$2"
-              echo "PR_CHANGED_FILES=$3"
+              echo "PR_ADDITIONS=$additions"
+              echo "PR_DELETIONS=$deletions"
+              echo "PR_CHANGED_FILES=$changed_files"
             } >> "$GITHUB_ENV"
-            echo "diff: $3 files, +$1/-$2"
+            echo "diff: $changed_files files, +$additions/-$deletions"
           else
             echo "::warning::could not resolve the diff size; the report will omit it."
           fi

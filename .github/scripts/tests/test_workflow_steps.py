@@ -434,6 +434,33 @@ def test_a_review_that_contains_a_token_is_not_posted(h, secret):
     assert h.posted() == []
 
 
+@pytest.mark.parametrize("stored", [f"{CLAUDE_TOKEN}\n", f" {CLAUDE_TOKEN}\n", "\n"])
+def test_a_token_stored_with_whitespace_does_not_block_a_clean_review(h, stored):
+    """lattice-tools#376: the Claude token secret was saved with a newline, and
+    grep -F read the newline as a second, empty pattern that matched every
+    line, so a review with nothing secret in it was refused."""
+    h.ctx["secrets.CLAUDE_CODE_OAUTH_TOKEN"] = stored
+    h.commit("base")
+    h.head()
+    start_round(h)
+    h.write_review("## Review\n\n**Verdict:** fine.\n", [])
+    posted = h.run("post")
+    assert posted.returncode == 0, posted.log
+    assert len(h.posted()) == 1
+
+
+def test_a_token_stored_with_whitespace_is_still_caught_in_a_review(h):
+    h.ctx["secrets.CLAUDE_CODE_OAUTH_TOKEN"] = f" {CLAUDE_TOKEN}\n"
+    h.commit("base")
+    h.head()
+    start_round(h)
+    h.write_review(f"## Review\n\nfound {CLAUDE_TOKEN}.\n", [])
+    posted = h.run("post")
+    assert posted.returncode != 0
+    assert "contains a credential" in posted.log
+    assert h.posted() == []
+
+
 def test_an_empty_review_is_not_posted(h):
     h.commit("base")
     h.head()

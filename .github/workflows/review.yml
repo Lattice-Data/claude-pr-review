@@ -676,9 +676,15 @@ jobs:
           esac
           # The last check before the review goes public. The reviewer cannot
           # read either token, but should that ever change, a review carrying
-          # one is not posted.
+          # one is not posted. Each token is trimmed first and matched as one
+          # literal string: a secret saved with a newline around it is common,
+          # and grep -F reads a pattern with a newline as two, one of them
+          # empty, which matches every review ever written.
+          body=$(<review-body.md)
           for secret in "$GH_TOKEN" "$CLAUDE_TOKEN"; do
-            if [ -n "$secret" ] && grep -qF -- "$secret" review-body.md; then
+            secret="${secret#"${secret%%[![:space:]]*}"}"
+            secret="${secret%"${secret##*[![:space:]]}"}"
+            if [ -n "$secret" ] && [[ "$body" == *"$secret"* ]]; then
               echo "::error::the review contains a credential; refusing to post it."
               exit 1
             fi

@@ -438,7 +438,7 @@ jobs:
             Read the file ${{ runner.temp }}/skill/SKILL.md and follow it
             exactly to review this pull request. The PR branch is already checked
             out in the current working directory. Use the REPO and PR NUMBER above
-            for the skill's `gh pr view` and `gh pr diff` calls.
+            for every `gh pr` command: `gh pr view`, `gh pr diff` and `gh pr checks`.
 
             The checkout has full history but is on a detached HEAD, so a bare
             branch name will not resolve. Where the skill says `git show
@@ -529,8 +529,10 @@ jobs:
           # that can write to the PR. `gh pr view` is denied the comment and
           # review fields because the round step hands the reviewer what
           # people with a role wrote, and nothing else. (-c is the short form
-          # of --comments; latestReviews is the one review field "reviews"
-          # does not match.) The git deny rules close what the git allow rules
+          # of --comments, matched only as a flag of its own, since a bare
+          # *-c* would also deny `--repo owner/lattice-curation`;
+          # latestReviews is the one review field "reviews" does not
+          # match.) The git deny rules close what the git allow rules
           # would let through: --output writes a file anywhere; a path outside
           # the checkout (absolute, ../ or ~) turns git diff into a reader of
           # any file; and a $ expands the environment into the output. echo is
@@ -548,7 +550,7 @@ jobs:
             --max-turns ${{ inputs.max_turns }}
             --add-dir ${{ runner.temp }}/skill
             --allowedTools "Edit(/review.md),Edit(/findings.json),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(git show:*),Bash(git log:*),Bash(git diff:*)"
-            --disallowedTools 'Bash(gh pr view *comments*),Bash(gh pr view *reviews*),Bash(gh pr view *Reviews*),Bash(gh pr view *-c*),Bash(git * --output*),Bash(git *--no-index*),Bash(git * /*),Bash(git * ../*),Bash(git * ~*),Bash(git *$*),Bash(echo *),Read(.git/**)'
+            --disallowedTools 'Bash(gh pr view *comments*),Bash(gh pr view *reviews*),Bash(gh pr view *Reviews*),Bash(gh pr view -c*),Bash(gh pr view * -c*),Bash(git * --output*),Bash(git *--no-index*),Bash(git * /*),Bash(git * ../*),Bash(git * ~*),Bash(git *$*),Bash(echo *),Read(.git/**)'
           # Telemetry for the Claude Code process this action spawns, which
           # reads it from the settings env block. All values must be strings.
           # OTEL_EXPORTER_OTLP_PROTOCOL has no default in Claude Code, and

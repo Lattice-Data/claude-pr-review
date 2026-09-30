@@ -122,9 +122,10 @@ token is not posted.
 
 These permissions were checked with `claude -p` (Claude Code 2.1.285) before
 release. Reads and writes outside the fence, `.git/config` through `Read`,
-`cat` and `grep`, git's `--output`, absolute and `../` paths, `$` expansion,
-`echo`, `printf` and the `gh pr view` comment and review fields were each
-tried and refused, and every allowed command ran. The comment on
+`cat` and `grep`, git's `--output` and absolute, `../` and `~` paths, `$`
+expansion, `echo`, `printf`, `python3`, `pip`, `gh api` and the `gh pr view`
+comment and review fields were each tried and refused, and every allowed
+command ran. The comment on
 `claude_args` in [`review.yml`](.github/workflows/review.yml) says why each
 rule is there. Change it and the TOOLING CONSTRAINTS in the prompt together;
 a test fails when they disagree.

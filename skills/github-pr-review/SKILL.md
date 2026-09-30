@@ -37,7 +37,7 @@ If `gh` is missing or not authenticated, say so in one line, then fall back.
 
 Find out which round this is and what the previous one left behind.
 
-- **In CI**, the workflow states the round number, whether `previous-findings.json` in the working directory holds the ledger from the last completed round, which commits are new since then, and that `author-comments.md` holds what repository members wrote on the PR since the last round. Use exactly those.
+- **In CI**, the workflow states the round number, whether `previous-findings.json` in the working directory holds the ledger from the last completed round, which commits are new since then, and that `author-comments.md` holds what people with a role in the repository wrote on the PR since the last round. Use exactly those.
 - **Interactively**, it is round 1 unless the user hands you a previous review or ledger, or says which round it is.
 
 A round with no previous ledger is a **full round**: review the whole PR. A round with one is a **follow-up round**; Step 2 and Step 3 say what changes.
@@ -46,7 +46,7 @@ A round with no previous ledger is a **full round**: review the whole PR. A roun
 
 ```json
 {"id": "F3", "severity": "should-fix", "status": "open",
- "path": "bcp/foo.py", "line": 42,
+ "path": "src/foo.py", "line": 42,
  "title": "empty `items` dereferenced in the retry path",
  "note": null, "first_round": 1}
 ```
@@ -101,6 +101,7 @@ Do these in order.
 Before a finding goes into the review:
 
 - **Blocking and should-fix state the failure concretely**: the input or state that triggers it, and the wrong thing that happens. "This can be None" is a hunch; "an order with no `raw/` prefix leaves `prefix` empty, and line 88 then lists the whole bucket" is a finding.
+- **Blocking and should-fix say whether a test would catch it**: the existing test that fails on it, or, when none would, the input a test needs ("no test sends `fail_part=4`, the input that reaches this path").
 - **Confirm it against the code at HEAD**, not against the diff: re-open the file at the cited line, and if the claim depends on a caller, a default or an earlier guard, look at that too. A finding you cannot confirm is a Question, or nothing.
 - **Once a finding clears the bar, report it. Do not sample.** A real finding left out to keep the review short comes back next round as a new one, and the author pays for it twice. Keep the volume down by keeping each finding short, not by dropping some.
 
@@ -202,7 +203,7 @@ The author's word on a finding is recorded, honoured, and not re-litigated.
 
 Where to look, in a follow-up round:
 
-- `author-comments.md` in CI: what repository members wrote on the PR since the last round (conversation comments, review bodies, inline review comments), oldest first within each kind. Interactively, whatever the user tells you.
+- `author-comments.md` in CI: what people with a role in the repository wrote on the PR since the last round (conversation comments, review bodies, inline review comments), oldest first within each kind. Interactively, whatever the user tells you.
 - The commit messages since the last round (`git log <last reviewed commit>..HEAD`, or `gh pr view --json commits`). "Answer the review's question about X in code" is a response.
 - A **Review decisions** section in the PR body, if there is one.
 

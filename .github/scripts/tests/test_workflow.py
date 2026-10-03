@@ -107,10 +107,10 @@ def test_a_caller_pins_a_tag_and_guards_against_forks(caller):
     assert (
         job["uses"] == "Lattice-Data/claude-pr-review/.github/workflows/review.yml@v1"
     )
-    assert (
-        job["if"]
-        == "github.event.pull_request.head.repo.full_name == github.repository"
-    )
+    condition = " ".join(job["if"].split())
+    assert condition.startswith(
+        "github.event.pull_request.head.repo.full_name == github.repository"
+    ), condition
     assert job["secrets"] == {
         "CLAUDE_CODE_OAUTH_TOKEN": "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
     }

@@ -1,0 +1,42 @@
+# Committed to Lattice-Data/db2-flattener as .github/workflows/claude-pr-review.yml.
+#
+# The review itself - workflow, scripts and skill - lives in
+# Lattice-Data/claude-pr-review. This file only says when it runs and what it
+# may do.
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: claude-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Only PRs from branches in this repository, since a fork's PR gets no
+    # secrets. And not PRs a bot opened: a Dependabot PR's run reads the
+    # Dependabot secret store, which does not hold CLAUDE_CODE_OAUTH_TOKEN,
+    # and claude-code-action refuses a bot actor anyway. Without this, every
+    # version bump would carry a red X for a review that could never run.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.user.type != 'Bot'
+    # What the review may do. The called workflow can use these or fewer,
+    # never more, and it fails to start if one is missing.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      checks: read
+      statuses: read
+    uses: Lattice-Data/claude-pr-review/.github/workflows/review.yml@v1
+    with:
+      # Appended to the reviewer's TOOLING CONSTRAINTS, which already say that
+      # no dependency is installed on the runner.
+      tooling_constraints: |
+        - The dependencies that are not installed include pandas, numpy and
+          s3fs.
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
